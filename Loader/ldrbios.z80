@@ -1,0 +1,691 @@
+; CP/M 3 Loader BIOS
+
+debug	equ 0
+
+cr	equ	0dh
+lf	equ	0ah
+
+; IO addresses
+sio_d		equ 030h	; SIO port A, data
+sio_c		equ 032h	; SIO port A, control
+ctc1		equ 041h	; CTC port 1
+gpio_in		equ 000h	; GP input port
+gpio_out	equ	010h	; GP output port
+
+gpio_out_sd_mosi	equ	01h
+gpio_out_sd_clk		equ	02h
+gpio_out_sd_ssel	equ	04h
+gpio_in_sd_det		equ	40h
+gpio_in_sd_miso		equ	80h
+
+regstore equ 0B000h
+
+extrn bdos
+
+	CSEG
+
+BOOT:		jp b_boot		; 0B00
+WBOOT: 		jp b_dummy
+CONST:		jp b_dummy
+CONIN:		jp b_dummy
+CONOUT: 	jp b_cout		; 0B0C
+LIST:		jp b_dummy
+AUXOUT:		jp b_dummy
+AUXIN:		jp b_dummy
+HOME:		jp b_home
+SELDSK:		jp b_seldsk
+SETTRK:		jp b_settrk
+SETSEC:		jp b_setsec
+SETDMA:		jp b_setdma		
+READ:		jp b_read
+WRITE:		jp b_dummy
+LISTST:		jp b_dummy
+SECTRN:		jp b_sectrn
+CONOST:		jp b_dummy
+AUXIST:		jp b_dummy
+AUXOST:		jp b_dummy
+DEVTBL:		jp b_dummy
+DEVINI:		jp b_dummy
+DRVTBL:		jp b_dummy
+MULTIO:		jp b_dummy
+FLUSH:		jp b_dummy
+MOVE:		jp b_move
+TIME:		jp b_dummy
+SELMEM:		jp b_dummy
+SETBNK:		jp b_dummy
+XMOVE:		jp b_dummy
+USERF:		jp b_dummy
+RESERV1:	jp b_dummy
+RESERV2:	jp b_dummy
+
+b_move:
+	ex de,hl
+	ldir
+	ex de,hl
+ret
+
+b_boot:
+	ld bc,(regstore)
+	ld de,(regstore+2)
+	ld hl,(regstore+4)
+	ld (E_BC),bc
+	ld (E_DE),de	; DE:HL = LBA offset
+	ld (E_HL),hl
+	ld bc,(regstore+6)
+	ld de,(regstore+8)
+	ld hl,(regstore+10)
+	ld (E_SBC),bc
+	ld (E_SDE),de	; DE:HL = LBA offset
+	ld (E_SHL),hl
+	ld ix,(regstore+12)
+	ld iy,(regstore+14)
+	ld (E_IX),ix
+	ld (E_IY),iy
+ret		; return to CPMLDR
+
+public handoff 
+
+handoff:
+	ld bc,(E_BC)
+	ld de,(E_DE)	; DE:HL = LBA offset
+	ld hl,(E_HL)
+	exx
+	ld bc,(E_SBC)
+	ld de,(E_SDE)	; DE:HL = LBA offset
+	ld hl,(E_SHL)
+	exx
+	ld ix,(E_IX)
+	ld iy,(E_IY)
+ret
+
+b_sectrn:
+	; translate logical sector in BC
+	push bc
+	; to physical sector in HL
+	pop hl
+	; according to a table in DE	
+ret
+
+b_read:
+	ld (oldstack),sp
+	ld sp,bstack
+	; calculate LBA block address 
+	; using the stored values
+	; (b_track)*16 + sector (+ partition offset) 32b!!!!!
+	ld hl,0
+	ld de,(b_track)
+	ld b,16
+	scf
+	ccf
+multloop:
+	adc hl,de
+	djnz multloop
+	; If carry, overflow error
+	
+	ld de,(b_sector)
+	adc hl,de
+	; (E_DE): (E_HL) + HL
+	ld de,(E_HL)
+	adc hl,de
+	push hl		; low word
+	ld de,(E_DE)
+	jr nc,dontinc
+	inc de
+dontinc:
+	pop hl
+	;call sd_cmd17
+	; DE:HL = LBA block
+	
+sd_cmd17:
+	ld iy,sd_buf
+	; read a sector from disk
+	; send Command 17 (xx,DE:HL,xx)??
+	; Construct the command IY -> Command buffer
+	;						IX -> LBA block address
+	ld	(iy+0),17|040h		; the command byte
+	ld	a,d					; stack = little endian
+	ld	(iy+1),a			; cmd_buffer = big endian
+	ld	a,e
+	ld	(iy+2),a
+	ld	a,h
+	ld	(iy+3),a
+	ld	a,l
+	ld	(iy+4),a
+	ld	(iy+5),000h|001h	; the CRC byte
+
+	
+	call sdlower_cs
+	ld b,6
+send_cmd:
+	ld l,(iy)
+	call sdtransmit_byte
+	inc iy
+	djnz send_cmd
+
+	call .sd_read_r1
+	or a
+	jp z,sd_readblock
+	ld a,'W'
+	jp sd_error
+	
+sd_readblock:
+	; (HL) -> Sector buffer
+	ld hl,(b_dma) ;buffer
+	call sdreceive_sector
+	call sd_rx	; CRC
+	call sd_rx	; CRC
+	call sdraise_cs
+	
+if debug
+	ld b,128
+	ld hl,(b_dma)
+printrec:
+	ld a,(hl)
+	push bc
+	call hexa
+	pop bc
+	inc hl
+	djnz printrec
+	
+	ld a,cr
+	ld c,a
+	call b_cout
+	ld a,lf
+	ld c,a
+	call b_cout
+
+	ld b,128
+	ld hl,buffer
+printbuf:
+	ld a,(hl)
+	push bc
+	call hexa
+	pop bc
+	inc hl
+	djnz printbuf
+	
+	ld a,cr
+	ld c,a
+	call b_cout
+	ld a,lf
+	ld c,a
+	call b_cout
+
+endif	
+	ld sp,(oldstack)	
+	xor a
+ret
+
+sd_error:
+	push af
+	ld c,9
+	ld de,sderr
+	call bdos
+	pop af
+	ld c,a
+	call b_cout
+	ld a,1
+ret
+
+b_setdma:
+	; store DMA address
+	;ld bc,08000h
+	ld (b_dma),bc
+if debug 
+	push bc
+	ld a,b
+	call hexa
+	pop bc
+	ld a,c
+	call hexa
+	ld a,':'
+	ld c,a
+	call b_cout
+endif
+ret
+
+b_setsec:
+	; store sector number
+	ld (b_sector),bc
+if debug 
+	push bc
+	ld a,b
+	call hexa
+	pop bc
+	ld a,c
+	call hexa
+	ld a,':'
+	ld c,a
+	call b_cout
+endif
+	
+ret
+
+b_home:
+	ld bc,0
+b_settrk:
+	; store track number
+	ld (b_track),bc
+if debug 
+	push bc
+	ld a,b
+	call hexa
+	pop bc
+	ld a,c
+	call hexa
+	ld a,':'
+	ld c,a
+	call b_cout
+endif
+	
+ret
+
+b_seldsk:
+	; Select active disk from C register
+	; Should always be zero during boot
+	ld hl,0
+	ld a,c
+	or a
+	jr nz,.seldsk_ret
+	; return with HL=(DPH)
+	ld hl,B_DPH
+.seldsk_ret:	
+ret
+
+
+b_cout:
+	; Send character in C
+	ld a,c
+	push af
+tx_rdy:
+	in	a,(sio_c)	; read sio control status byte
+	and	4		; check the xmtr empty bit
+	jr z,tx_rdy			; a = 0 = not ready
+
+	; to SIO at sio_d
+	ld b,0
+	ld a,sio_d
+	ld c,a
+	
+	pop af
+	out (c),a
+ret
+
+b_dummy:
+ret
+
+;#############################################################################
+; Print the value in A in hex
+; Clobbers C
+;#############################################################################
+hexa:
+	push	af
+	srl	a
+	srl	a
+	srl	a
+	srl	a
+	call	.hexnib
+	pop	af
+	push	af
+	and	00fh
+	call	.hexnib
+	pop	af
+	ret
+
+.hexnib:
+	add	'0'
+	cp	'9'+1
+	jp	m,.hexnum
+	add	'A'-'9'-1
+.hexnum:
+	ld	c,a
+	jp	b_cout	   ; tail
+
+;
+;	SD card interface
+;
+;	This is absolutely foul because the design puts the page registers
+;	and the bitbanging on the same port. We can't have interrupt code
+;	doing bank switching during an I/O or we get subtle corruption.
+;
+;	As blocking interrupts would suck for serial we instead keep a
+;	busy flag for the gpio and defer timer activity (which does bank
+;	switch) but not serial which does not.
+;
+
+_sd_busy: 	db 0
+_gpio:		db 0
+
+.sd_read_r1:
+	ld	b,0f0h		; B = number of retries
+.sd_r1_loop:
+	call sdreceive_byte	; read a byte into A (and a copy in E as well)
+	ld a,l
+	and	080h		; Is the MSB set to 1?
+	jr	z,.sd_r1_done	; If MSB=0 then we are done
+	djnz	.sd_r1_loop	; else try again until the retry count runs out
+.sd_r1_done:
+	ld	a,l		; copy the final value into A
+	or a 
+	jp z,.sd_r1_noerr
+	ld a,'Y'
+	jp sd_error
+	
+.sd_r1_noerr:
+	; keep reading bytes 
+	; either we get a response or timeout
+	; read and toss bytes while waiting for the data token
+	ld      bc,01000h		; expect to wait a while for a reply
+.sd_cmd17_loop:
+	call sdreceive_byte		; (clobbers A, DE)
+	ld a,l
+	cp	0ffh			; if a=0xff then command is not yet completed
+	jr nz,.sd_cmd17_token
+	dec	bc
+	ld	a,b
+	or	c
+	jr	nz,.sd_cmd17_loop
+	ld a,'X'
+	jp sd_error
+.sd_cmd17_token:
+	cp	0feh			; A = data block token? (else is junk from the SD)
+	jp z,.sd_r1_return
+	ld a,'Z'
+	jp sd_error
+	
+.sd_r1_return:
+	xor a
+ret
+
+
+sdlower_cs:
+	ld	a,1
+	ld	(_sd_busy),a
+	ld	a,(_gpio)
+	and	0FDh
+	or	001h
+	out	(gpio_out),a
+	and	0FBh
+	ld	(_gpio),a
+	out	(gpio_out),a
+sd_spi_idle:
+	xor	a
+	ld	(_sd_busy),a
+	ret
+
+	
+sdraise_cs:
+	ld	a,1
+	ld	(_sd_busy),a
+	ld	a,(_gpio)
+	and	0FDh
+	out	(gpio_out),a
+	or	005h
+	ld	(_gpio),a
+	out	(gpio_out),a
+	; Fall through
+sdreceive_byte:	; return byte in L
+	ld	a,1
+	ld	(_sd_busy),a
+	ld	a,(_gpio)
+	or	001h		; data high
+	and	0FDh		; clock
+	ld	d,a
+	add	2
+	ld	e,a		; D is clock low E is high
+	ld	c,010h
+	call	sd_rx
+	jr	sd_spi_idle
+
+	; Entry point with registers set up
+sd_rx:
+	;	Clock the bits	(47 clocks a bit) or about 25K/second minus
+	; 	overheads per byte - so nearer 20K which is adequate for our
+	; 	needs
+	;	Bit 0
+	out	(c),d
+	out	(c),e
+	in	a,(gpio_in)
+	rla	
+	rl	l
+	;	Bit 1
+	out	(c),d
+	out	(c),e
+	in	a,(gpio_in)
+	rla	
+	rl	l
+	;	Bit 2
+	out	(c),d
+	out	(c),e
+	in	a,(gpio_in)
+	rla	
+	rl	l
+	;	Bit 3
+	out	(c),d
+	out	(c),e
+	in	a,(gpio_in)
+	rla	
+	rl	l
+	;	Bit 4
+	out	(c),d
+	out	(c),e
+	in	a,(gpio_in)
+	rla	
+	rl	l
+	;	Bit 5
+	out	(c),d
+	out	(c),e
+	in	a,(gpio_in)
+	rla	
+	rl	l
+	;	Bit 6
+	out	(c),d
+	out	(c),e
+	in	a,(gpio_in)
+	rla	
+	rl	l
+	;	Bit 7
+	out	(c),d
+	out	(c),e
+	in	a,(gpio_in)
+	rla	
+	rl	l
+	ret
+
+;
+;	Slightly less performance critical which
+;	is good as it's annoying on this setup
+;	due to the shared gpio
+;
+;	Byte to send is in L
+;
+sdtransmit_byte:
+	ld	a,1
+	ld	(_sd_busy),a
+
+	ld	a,(_gpio)
+	and	0FDh		; clock high
+	;	Clock the bits out. Ignore reply
+	;	48 clocks a bit
+	;	
+	ld	h,2	; saves us 6 clocks a bit
+	;
+	;	Bit 0
+	rra
+	rl	l
+	rla
+	out	(gpio_out),a
+	add	h
+	out	(gpio_out),a
+	sub	h
+	;	Bit 1
+	rra
+	rl	l
+	rla
+	out	(gpio_out),a
+	add	h
+	out	(gpio_out),a
+	sub	h
+	;	Bit 2
+	rra
+	rl	l
+	rla
+	out	(gpio_out),a
+	add	h
+	out	(gpio_out),a
+	sub	h
+	;	Bit 3
+	rra
+	rl	l
+	rla
+	out	(gpio_out),a
+	add	h
+	out	(gpio_out),a
+	sub	h
+	;	Bit 4
+	rra
+	rl	l
+	rla
+	out	(gpio_out),a
+	add	h
+	out	(gpio_out),a
+	sub	h
+	;	Bit 5
+	rra
+	rl	l
+	rla
+	out	(gpio_out),a
+	add	h
+	out	(gpio_out),a
+	sub	h
+	;	Bit 6
+	rra
+	rl	l
+	rla
+	out	(gpio_out),a
+	add	h
+	out	(gpio_out),a
+	sub	h
+	;	Bit 7
+	rra
+	rl	l
+	rla
+	out	(gpio_out),a
+	add	h
+	out	(gpio_out),a
+
+	xor	a
+	ld	(_sd_busy),a
+	ret
+
+; (HL) -> Sector buffer
+sdreceive_sector:
+	push	ix
+	push	hl
+	pop	ix
+	
+	ld	bc,0FFh		; 0 for count 255 for reload of A
+
+rx_byte:
+	call	sdreceive_byte
+	;	Mark the SD busy (sd_spi_receive_byte marked it idle
+	;	and keep it busy while we burst the block. It's a trade
+	;	off versus slower I/O
+	ld	a,1
+	ld	(_sd_busy),a
+	ld	(ix),l
+	inc	ix
+	call	sd_rx
+	ld	(ix),l
+	inc	ix
+	ld	b,0FFh		; 510 bytes
+rx_loop:
+	call	sd_rx
+	ld	(ix),l	
+	inc	ix
+	call	sd_rx
+	ld	(ix),l
+	inc	ix
+	djnz	rx_loop
+	pop	ix
+	xor	a
+	ld	(_sd_busy),a
+ret
+
+
+	DSEG
+	
+b_dma:		dw 0
+b_track:	dw 0
+b_sector:	dw 0	
+sd_buf:		ds 6
+sderr:		db 'SD card Error: ', cr, lf, '$'
+	; Entry values
+E_BC:	dw 0
+E_DE:	dw 0
+E_HL:	dw 0
+E_SBC:	dw 0
+E_SDE:	dw 0
+E_SHL:	dw 0
+E_IX:	dw 0
+E_IY:	dw 0
+
+	; Disk Parameter Header (DPH)
+B_DPH:	
+	XLT:		dw 0
+	zero:		ds 9
+	MF:			db 0
+	DPB:		dw B_DPB
+	CSV:		dw 0
+	ALV:		dw b_alv	;length(ALV) = (DSM/8) + (2?)
+	DIRBCB:		dw D_BCB
+	DTABCB:		dw B_BCB
+	HASH:		dw 0FFFFh
+	HBANK:		db 0
+
+	; Disk Parameter Block
+	; Constraints:
+	; SD card uses 512 byte sectors
+	; 8k blocks, 1 block track
+	; 1023 dir entries
+
+	
+B_DPB:
+	SPT:	dw	64
+	BSH:	db	6
+	BLM:	db	63
+	EXM:	db	3
+	DSM:	dw	7FFFh
+	DRM:	dw	4000
+	AL0:	db	0FFh
+	AL1:	db	0FFh
+	CKS:	dw	8000h
+	OFF:	dw	2
+	PSH:	db	2
+	PHM:	db	3
+
+D_BCB:
+	dDRV:	db 0ffh
+	dREC:	db 0,0,0
+	dWFLG:	db 0
+	ddzero:	db 0
+	dTRACK:	dw 0
+	dSECTOR:	dw 0
+	dBUFFAD:	dw drecord
+
+B_BCB:
+	DRV:	db 0ffh
+	REC:	db 0,0,0
+	WFLG:	db 0
+	dzero:	db 0
+	TRACK:	dw 0
+	SECTOR:	dw 0
+	BUFFAD:	dw buffer
+
+oldstack:	dw 0
+			ds 256
+bstack:		
+drecord:	ds 128
+buffer: 	ds 512
+b_alv:		ds 1
+end	

@@ -1,0 +1,4 @@
+r Tools\setcol.z80
+zmac setcol
+link color=setcol
+w color.com b

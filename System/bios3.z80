@@ -1,0 +1,1118 @@
+;##########################################################################
+; CP/M 3 BIOS for 2063 z80 retro board
+;
+; Sources originally written by John Winans with contributions from Trevor Jacobs
+; Refactored for CP/M 3 by SolderGirl
+;
+;##########################################################################
+
+true	equ -1
+false	equ not true
+banked	equ true
+
+.debug		equ	false
+m_debug		equ false
+VDP			equ false
+VDP_font 	equ 0
+RTC_debug	equ 0
+
+;##########################################################################
+; 'System Control Block Definition for CP/M3 BIOS'
+; From the CP/M 3 System Manual over at
+; http://www.s100computers.com/Software%20Folder/CPM3%20BIOS%20Installation/CPM3%20System%20Guide.pdf
+;
+; These are all the public variables defined by CPM3
+;##########################################################################
+
+	extrn @civec, @covec, @aivec, @aovec, @lovec, @bnkbf
+	extrn @crdma, @crdsk, @vinfo, @resel, @fx, @usrcd
+	extrn @mltio, @ermde, @erdsk, @media, @bflgs
+	extrn @date, @hour, @min, @sec, ?erjmp, @mxtpa, @dtbl
+
+; These are all the public variables defined by BIOSKRNL
+;##########################################################################
+
+	extrn @adrv,@rdrv,@trk,@sect	; parameters for disk I/O
+	extrn @dma,@dbnk,@cnt,@cbnk
+
+; These are the dump routines from DUMP.ASM
+;##########################################################################
+
+
+	extrn disk_dump, dumpdpb, dumpdtbl, hexdmp
+	extrn hexdump_a, dumpdma, dump_regs, dumpivars
+	
+; These are all the publics from USER.Z80
+;##########################################################################
+
+	extrn usrfunc
+
+if VDP
+	extrn vdp_out,curs_tick,curs0,curs1
+endif
+
+cr			equ	0dh		; carriage return
+lf			equ	0ah		; line feed
+
+
+CSEG
+
+	;public console routines
+	;public	?cinit,?ci,?co,?cist,?cost
+	extrn	?cinit,?ci,?co,?cist,?cost
+	extrn devtbl,getdev
+	public con_tx_char,con_rx_ready
+
+	;public values for SPI
+	; public	mosi,sdclk,sdsel,miso
+	; mosi	equ	gpio_out_sd_mosi
+	; miso	equ	gpio_in_sd_miso
+	; sdclk	equ	gpio_out_sd_clk
+	; sdsel	equ	gpio_out_sd_ssel
+
+	public 	gpio_in,gpio_out,gpiocache
+
+	;publics for SIO
+	public	satxrdy,sbtxrdy,sarxrdy,sbrxrdy
+		satxrdy	equ	sioa_tx_ready
+		sbtxrdy	equ siob_tx_ready
+		sarxrdy	equ sioa_rx_ready
+		sbrxrdy	equ	siob_rx_ready
+
+	public	satxch,sbtxch,sarxch,sbrxch
+		satxch	equ	sioa_tx_char
+		sbtxch	equ	siob_tx_char
+		sarxch	equ	sioa_rx_char
+		sbrxch	equ	siob_rx_char
+
+	public	sainit,sbinit
+		sainit	equ	sioa_init
+		sbinit	equ	siob_init
+
+	;publics for CTC
+	public 	ictc1,ictc2,ictc3
+		ictc1 equ init_ctc_1
+		ictc2 equ init_ctc_2
+		ictc3 equ init_ctc_3
+
+	;publics for debug
+	public puts_crlf,cr,lf,iputs,puts
+	public spamon,spamoff
+
+
+	public setbank
+if VDP	
+	public curs0,curs1
+endif	
+
+; Z80 Retro Rev 3 IO port definitions
+
+gpio_in:		equ 000h		; GP input port
+gpio_out:		equ	010h		; GP output port
+prn_dat:		equ	020h		; printer data out
+
+sio_ad:			equ	030h		; SIO port A, data
+sio_bd:			equ	031h		; SIO port B, data
+sio_ac:			equ	032h		; SIO port A, control
+sio_bc:			equ	033h		; SIO port B, control
+
+ctc_0			equ	040h		; CTC port 0
+ctc_1			equ	041h		; CTC port 1
+ctc_2			equ	042h		; CTC port 2
+ctc_3			equ	043h		; CTC port 3
+
+flash_disable:	equ	070h		; dummy-read from this port to disable the FLASH
+
+
+; bit-assignments for General Purpose output port
+gpio_out_sd_mosi	equ	001h
+gpio_out_sd_clk		equ	002h
+gpio_out_sd_ssel	equ	004h
+gpio_out_prn_stb	equ	008h
+gpio_out_a15		equ	010h
+gpio_out_a16		equ	020h
+gpio_out_a17		equ	040h
+gpio_out_a18		equ	080h
+
+; a bitmask representing all of the lobank address bits
+gpio_out_lobank:	equ	0|(gpio_out_a15|gpio_out_a16|gpio_out_a17|gpio_out_a18)
+
+.low_bank	equ 0h
+
+gpiocache: 				; GPIO output latch cache
+			db	gpio_out_sd_mosi|gpio_out_sd_clk|gpio_out_sd_ssel|gpio_out_prn_stb|(.low_bank<<4)
+
+; bit-assignments for General Purpose input port
+gpio_in_prn_err		equ	001h
+gpio_in_prn_stat	equ	002h
+gpio_in_prn_papr	equ	004h
+gpio_in_prn_bsy		equ	008h
+gpio_in_prn_ack		equ	010h
+gpio_in_user1		equ	020h
+gpio_in_sd_det		equ	040h
+gpio_in_sd_miso		equ	080h
+
+; Software RTC / Interrupts
+IVTbase				equ 0FF00h
+rtc_counter:		db 0
+rtc_limit:			db 153		; IRQ will happen at a freq of (CLK/256/256)
+								; 1 sec = 152.587890625 ticks @ 10 MHz
+
+joyport0		equ	0a8h		; I/O port for joystick 0
+joyport1		equ	0a9h		; I/O port for joystick 1
+
+; Storage for parameters 
+; passed in by the ROM Setup
+	public RBC,RDE,RHL,RSBC,RSDE,RSHL,RIX,RIY
+RBC: 	dw 0
+RDE: 	dw 0
+RHL: 	dw 0
+RSBC:	dw 0
+RSDE:	dw 0
+RSHL:	dw 0
+RIX:	dw 0
+RIY:	dw 0
+
+	public storeregs
+storeregs:
+	ld (RBC),bc		; B= Baudrates, C= Boot partition Nr.
+	ld (RDE),de		; DE:HL Boot partition offset
+	ld (RHL),hl
+	exx
+	ld (RSBC),bc 	; shadow registers currently unused
+	ld (RSDE),de
+	ld (RSHL),hl
+	exx
+	ld (RIX),ix		; COVEC from ROM
+	ld (RIY),iy		; CIVEC from ROM
+	
+	ld a,b
+	and 00Fh		; Low Nibble = SIO-B
+	;ld (baudb),a
+	ld c,a
+	ld b,1
+	call getdev
+	ld (ix+7),c
+	
+	ld bc,(RBC)
+	ld a,b
+	rra
+	rra
+	rra
+	rra
+	and 00Fh		; High Nibble = SIO-A
+	ld c,a
+	ld b,0
+	call getdev
+	ld (ix+7),c
+	;ld (bauda),a
+	; ld hl,RBC
+	; ld bc,16
+	; ld e,0
+	; call hexdmp
+ret
+
+setbaud:
+	; get a device number in B
+	; and a baud nibble in A
+	ld c,a
+	push bc
+	call devtbl		; prepare device table
+	; HL -> table
+	pop bc
+	push bc
+	ld a,b
+	or a
+	jr z,dev0
+	ld de,8
+sbadd:
+	add hl,de
+	djnz sbadd
+dev0:
+	ld de,7			; add 7 more bytes to skip the name and capabilities
+	add hl,de
+	; set baudrate Nibble
+	pop bc
+	ld (hl),c
+	; call init for the device
+	ld c,b
+	call ?cinit
+ret
+; serbufa:	ds 16	; 16 bytes recieve buffer
+; bufaptr:	db 0
+; serbufb:	ds 16
+; bufptrb:	db 0
+
+;###############################################
+; Character devices
+;###############################################
+		
+@bdtbl:
+	db	0,0,0,0, 1,      2,     3,     192, 96,   64,   48,   32,   24,   16,   12,   6
+	;	0,0,0,0, 115200, 57600, 38400, 600, 1200, 1800, 2400, 3600, 4800, 7200, 9600, 19200
+	
+;###############################################
+; Interrupt service routines
+;###############################################
+					
+; public isrflags
+
+; isrflags:
+	; db 03h 		; D0: J0 active, D1: J1 active, D2: J0 flag, D3: J1 flag
+; joyv0:
+	; db 00h		; most recent value from port
+	; db 00h		; last reported value
+; joyv1:
+	; db 00h		; most recent value from port
+	; db 00h		; last reported value
+; tmp:
+	; db 00h		; temporary storage for ISR
+
+;###############################################
+; Joystick Character Device
+;###############################################
+
+; We can do 8 directions + fire button.
+; However since many games will be expecting 4 cursor keys,
+; we definitely should support a 4 button mode as well.
+
+; Define two lists of bytes to return for Joysticks
+; These should be changeable by a USER function call
+	; public j0keys,j1keys
+; j0keys:	db '4','7','8','9','6','3','2','1','5','0' 	; Left,LeftUp,Up,UpRight,Right,RightDown,Down,LeftDown,Fire,Button2
+; j1keys:	db '4','7','8','9','6','3','2','1','5','0' 	; Left,LeftUp,Up,UpRight,Right,RightDown,Down,LeftDown,Fire,Button2
+
+; joy_rx_char:
+	; call j0rdy
+	; or a
+	; jr z,joy_rx_char
+	; call j0char
+	; ret
+
+; ; check if j0 has changed since last read
+; j0rdy:
+	; ld a,(joyv0+1)	; former
+	; ld b,a
+	; in a,(joyport0)
+	; cp b			; zero if no change
+	; jr z,.noj0
+	; ld b,a
+	
+	; ld (joyv0),a
+	; ret
+; .noj0:
+	; xor a
+	; ret
+
+	; ld a,(isrflags)
+	; and 004h
+	; ret z		; 0 = no char ready
+	; ld a,0FFh	; FF = char ready
+	; ret
+
+; check if j1 has changed since last read
+; j1rdy:
+	; ld a,(isrflags)
+	; and 008h
+	; ret z		; 0 = no char ready
+	; ld a,0FFh	; FF = char ready
+	; ret
+
+; return a char depending on j0	in A
+; D7=Up,D6=Down,D5=Right,D4=Btn2,D3=X,D2=Left,D1=X,D0=Fire
+; j0char:
+	; ld a,(joyv0+1)		; the former value
+	; ld b,a
+	; ld a,(joyv0)		; the current value
+	; ld c,a
+	; ; check the buttons first
+	; bit 0,c
+	; jr nz,.nofire		; non-zero = not pressed
+	; bit 0,b				; was it pressed before?
+	; jr z,.nofire		; not changed
+		; ld a,(j0keys+8)
+		; jr .j0ret		; return fire button code
+; .nofire:
+	; bit 4,c
+	; jr nz,.nobtn2		; non-zero = not pressed
+	; bit 4,b				; was it pressed before?
+	; jr z,.nobtn2		; not changed
+		; ld a,(j0keys+9)
+		; jr .j0ret		; return button 2 code
+; .nobtn2:
+	; ; if we arrive here, examine D7,D6,D5,D2 
+	; ; and return the apropriate byte
+	; bit 2,c
+	; jr nz,.noleft
+	; ; left is pressed
+	; bit 7,c		; Up?
+	; jr nz,.noupleft
+	; ; return left+up 
+	; ld a,(j0keys+1)
+	; jr .j0ret
+; .noupleft:
+	; bit 6,c		; Down?
+	; jr nz,.nodnleft
+	; ; return left+down
+	; ld a,(j0keys+7)
+	; jr .j0ret
+; .nodnleft:
+	; ; return left
+	; ld a,(j0keys)
+	; jr .j0ret
+; .noleft:
+	; bit 5,c
+	; jr nz,.noright
+	; ; right is pressed
+	; bit 7,c		; Up?
+	; jr nz,.noupright
+	; ; return right+up
+	; ld a,(j0keys+3)
+	; jr .j0ret
+; .noupright:	
+	; bit 6,c		; Down ?
+	; jr nz,.nodnright
+	; ; return right+down
+	; ld a,(j0keys+5)
+	; jr .j0ret
+; .nodnright:
+	; ; return right
+	; ld a,(j0keys+4)
+	; jr .j0ret
+; .noright:
+	; ; if we make it to here, it can only be up,down, or nothing
+	; ; all diagonals are already accounted for
+	; bit 7,c 	; Up ?
+	; jr nz,.noup
+	; ; return up
+	; ld a,(j0keys+2)
+	; jr .j0ret
+; .noup:	
+	; bit 6,c		; down?
+	; jr nz,.nodown
+	; ; return down
+	; ld a,(j0keys+6)
+	; jr .j0ret
+; .nodown:
+	; ; not a single key/direction.
+	; xor a	; return zero
+; .j0ret:	
+	; ; save the current value as last reported one before returning
+	; ld b,a	; save the return value
+	; ld a,c 	; current value
+	; ld (joyv0+1),a	; save as the new former
+	; ; reset the flag
+	; ld a,(isrflags)
+	; and 0FBh
+	; ld (isrflags),a
+	; ld a,b 	; return value in A
+	; ret
+
+; ;###############################################
+; ; Timer 0 -> Joysticks
+; ;###############################################
+
+; ctc0_isr:
+	; push af
+	; push bc
+	; ;push de
+	; ;push hl
+
+	; ld a,(isrflags)
+	; and 001h
+	; jr z,.jp2
+	; ; read joy0 here
+	
+	; ld a,(joyv0)		; get the old value
+	; ld b,a
+	; in a,(joyport0)		; get the new value
+	; cp b		; changed?
+	; jr z,.jp2
+	; ; changed, set a flag
+	; ld a,(isrflags)
+	; or 004h
+	; ld (isrflags),a
+	; ; and save the new byte
+	; ld (joyv0),a 
+
+; .jp2:
+	; ld a,(isrflags)
+	; and 002h
+	; jr z,.isr_tail
+	; ; read joy1 here
+
+	; ld a,(joyv1)		; get the old value
+	; ld b,a
+	; in a,(joyport1)		; get the new value
+	; cp b		; changed?
+	; jr z,.isr_tail
+	; ; changed, set a flag
+	; ld a,(isrflags)
+	; or 008h
+	; ld (isrflags),a
+	; ; and save the new byte
+	; ld (joyv1),a
+
+; .isr_tail:
+	; ;pop hl
+	; ;pop de
+	; pop bc
+	; pop af
+	; ei
+	; reti
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;###############################################
+; Timer 3 -> RTC
+;###############################################
+
+rtc_irq_handler:
+	push af
+	push bc
+if RTC_debug > 0	
+	ld a,'.'
+	ld c,a
+	call con_tx_char
+endif
+	; get counter and timebase
+	ld a,(rtc_limit)
+	ld b,a	
+	ld a,(rtc_counter)
+	; increase counter
+	inc a
+	; compare to time base
+	cp b
+	; count a second
+	call z,.advance_RTC
+	; store counter
+	ld (rtc_counter),a
+	
+	pop bc
+	pop af
+	ei
+	reti
+
+;###############################################
+; Real Time Clock
+;###############################################
+
+.advance_RTC:
+if RTC_debug > 0
+	ld a,'-'
+	ld c,a
+	call con_tx_char
+endif	
+	; flip LSB of time base.
+	ld a,(rtc_limit)
+	xor 01h
+	ld (rtc_limit),a
+
+	ld a,(@sec)		;@sec byte / BCD
+	inc a
+	daa	
+	cp 060h
+	jr z,.incminute
+	ld (@sec),a
+	xor a
+	ret
+.incminute:
+	xor a
+	ld (@sec),a
+	ld a,(@min)		;@min byte / BCD
+	inc a
+	daa	
+	cp 060h
+	jr z,.inchour
+	ld (@min),a
+	xor a
+	ret
+.inchour:
+	xor a
+	ld (@min),a
+	ld a,(@hour)	;@hour byte / BCD
+	inc a
+	daa	
+	cp 024h
+	jr z,.incdate
+	ld (@hour),a
+	xor a
+	ret
+.incdate:	
+	push hl
+	ld hl,(@date)		;@date word
+	inc hl
+	ld (@date),hl
+	pop hl
+	xor a
+	ret
+
+;###############################################
+; Set Memory Bank
+;###############################################
+
+setbank:
+if m_debug
+	push af
+	call iputs
+	db ' SETBNK: ',0
+	;call spamon	
+	pop af
+	push af
+	call hexdump_a
+	;call spamoff
+	call iputs
+	db ' C:',0
+	ld a,(@cbnk)
+	call hexdump_a
+    call    iputs
+    db ' D:',0
+    ld a,(@dbnk)
+    call hexdump_a
+	call    iputs
+    db ' O:',0
+    ld	a,(gpiocache)
+	and 0f0h	; mask out the lower nibble
+	call hexdump_a
+	;call    iputs
+    ;db ' -> ',0
+	pop af
+	push af
+	;call dump_regs
+	call puts_crlf
+	pop af
+endif	
+	add a,a
+	add a,a
+	add a,a
+	add a,a
+	and 0f0h
+	ld c,a
+	ld	a,(gpiocache)
+	and 0fh	; mask out the upper nibble
+	or	c		; then or in the new bank
+	ld	(gpiocache),a
+	out	(gpio_out),a
+	ret
+
+;###############################################
+; Init char devices
+;###############################################
+	DSEG
+
+; ?cinit:
+	; ; C = 0
+	; ld a,c				; C= device number
+	; or a
+	; jr nz,.notsioa
+	; ; SIO-A init
+	; ;push af
+	; ; @ctbl+7
+	; ld a,(@ctbl+7)			; Get Baudrate for Device 0
+	; ld b,0
+	; ld c,a					; make 16bit value
+	; ; @bdtbl
+	; ld hl,@bdtbl
+	; add hl,bc
+	; ld	c,(hl)				; C=192=600bps, C=96=1200bps, C=48=2400bps, C=24=4800bps, C=12=9600bps, C=6=19200bps, C=3=38400, C=1=115200bps
+	; call	init_ctc_1		; start CTC1 in case J11-A selects it!
+	; call	sioa_init		; 115200 or 19200/9600 depending on J11-A
+	; ret
+; .notsioa:
+	; ; C = 1
+	; dec a
+	; jr nz,.notsiob
+	; ; SIO-B init
+	; ld a,(@ctbl+14)			; Get Baudrate for Device 1
+	; ld b,0
+	; ld c,a					; make 16bit value
+	; ; @bdtbl
+	; ld hl,@bdtbl
+	; add hl,bc
+	; ld	c,(hl)				; C=192=600bps, C=96=1200bps, C=48=2400bps, C=24=4800bps, C=12=9600bps, C=6=19200bps, C=3=38400, C=1=115200bps
+	; call	init_ctc_2		; start CTC2 in case J11-B selects it!
+	; call	siob_init		; 115200 or 19200/9600 depending on J11-A
+	; ret
+; .notsiob:
+	; ; C = 2
+	; dec a
+	; jr nz,.notprn
+	; ; PRN init
+	; call prn_init
+	; ret
+; .notprn:
+	; ; C = 3
+	; dec a
+	; jr nz,.notvdp
+; if VDP
+	; ld bc,0101h			; B=1=vdp,C=1=Init
+	; call usrfunc			; VDP init is done in the bootloader
+; endif	
+	; ret
+; .notvdp:
+	; ; C >= 4
+	; cp 0fh
+	; jr nz,.nodev
+	; ;call init_ctc_3
+; .nodev:	
+	; ; invalid device
+	; ret
+
+	CSEG
+
+;###############################################
+; Console Input
+; Input: B = Device Number
+;###############################################
+
+; ?ci:
+	; ld a,b
+	; or a
+	; jp z,sioa_rx_char
+	; dec a
+	; jp z,siob_rx_char
+	; dec a
+	; jp z,.ci_ret ; no prn input
+	; dec a
+	; jp z,joy_rx_char
+	; ; other devices have no input
+; .ci_ret:	
+	; ret
+
+;###############################################
+; Console Output
+; Input: B = Device Number
+;###############################################
+
+; ?co:
+	; ld a,b				; B = device number
+	; or a
+	; jp z,sioa_tx_char	; B >= 1
+	; dec a
+	; jp z,siob_tx_char	; B >= 2
+	; dec a
+	; jp z,prn_out		; B >= 3
+	; dec a
+; if VDP
+	; jp z,vdp_out
+; endif
+	; ret
+
+;###############################################
+; Input status
+; Input: B = Device Number
+;###############################################
+
+; ?cist:
+; if VDP
+	; push bc
+	; call curs_tick
+	; pop bc
+; endif
+	; ld a,b
+	; or a
+	; jr nz,.nota
+	; call sioa_rx_ready
+	; ret	z		; A = 0 = not ready
+	; ld	a,0ffh
+	; ret			; A = 0xff = ready
+; .nota:
+	; dec b
+	; jr nz,.notb
+	; call siob_rx_ready
+	; ret	z		; A = 0 = not ready
+	; ld	a,0ffh
+	; ret			; A = 0xff = ready
+; .notb:
+	; dec b
+	; jr nz,.notpr
+	; ; printer has no input?
+	; ret
+; .notpr:
+	; ; this should be Joysticks
+	; jp j0rdy
+	; ret
+
+;###############################################
+; Output Status
+; Input: B = Device Number
+;###############################################
+
+; ?cost:
+	; ld a,b
+	; or a
+	; jr nz,.ost1
+	; call sioa_tx_ready
+	; ret	z		; A = 0 = not ready
+	; ld	a,0ffh
+	; ret			; A = 0xff = ready
+; .ost1:
+	; dec a
+	; jr nz,.ost2
+	; call siob_tx_ready
+	; ret	z		; A = 0 = not ready
+	; ld	a,0ffh
+	; ret			; A = 0xff = ready
+; .ost2:
+	; dec a
+	; jr nz,.ost3
+	; call prn_stat
+	; ret	z		; A = 0 = not ready
+	; ld	a,0ffh
+	; ret			; A = 0xff = ready
+; .ost3:
+; if VDP
+	; ld a,0FFh	; VDP always ready
+	; ;check VDP ready status?
+; endif
+	; ret
+
+; Drivers for the SIO
+
+;##############################################################
+; Return NZ if sio A tx is ready
+; Clobbers: AF
+;##############################################################
+sioa_tx_ready:
+	in	a,(sio_ac)	; read sio control status byte
+	and	4		; check the xmtr empty bit
+	ret			; a = 0 = not ready
+
+;##############################################################
+; Return NZ if sio B tx is ready
+; Clobbers: AF
+;##############################################################
+siob_tx_ready:
+	in	a,(sio_bc)	; read sio control status byte
+	and	4		; check the xmtr empty bit
+	ret			; a = 0 = not ready
+
+;##############################################################
+; Return NZ (with A=1) if sio A rx is ready and Z (with A=0) if not ready.
+; Clobbers: AF
+;##############################################################
+con_rx_ready:
+sioa_rx_ready:
+	in	a,(sio_ac)	; read sio control status byte
+	and	1		; check the rcvr ready bit
+	ret			; 0 = not ready
+
+;##############################################################
+; Return NZ (with A=1) if sio B rx is ready and Z (with A=0) if not ready.
+; Clobbers: AF
+;##############################################################
+siob_rx_ready:
+	in	a,(sio_bc)	; read sio control status byte
+	and	1		; check the rcvr ready bit
+	ret			; 0 = not ready
+
+
+	DSEG
+
+;##############################################################
+; init SIO port A/B
+; Clobbers HL, BC, AF
+;##############################################################
+siob_init:
+	ld	c,sio_bc	; port to write into (port B control)
+	jp	.sio_init
+
+sioa_init:
+	ld	c,sio_ac	; port to write into (port A control)
+
+.sio_init:
+	ld	hl,.sio_init_wr	; point to init string
+	ld	b,.sio_init_len_wr ; number of bytes to send
+	otir			; write B bytes from (HL) into port in the C reg
+	ret
+
+;##############################################################
+; Initialization string for the Z80 SIO
+;##############################################################
+
+.sio_init_wr:
+	db	00011000b	; wr0 = reset everything
+	db	00000100b	; wr0 = select reg 4
+	db	01000100b	; wr4 = /16 N1 (115200 from 1.8432 MHZ clk)
+	db	00000011b	; wr0 = select reg 3
+	db	11000001b	; wr3 = RX enable, 8 bits/char
+	db	00000101b	; wr0 = select reg 5
+	db	01101000b	; wr5 = DTR=0, TX enable, 8 bits/char
+.sio_init_len_wr:   equ $-.sio_init_wr
+
+	CSEG
+
+;##############################################################
+; Wait for the transmitter to become ready and then
+; print the character in the C register.
+; Clobbers: AF
+;##############################################################
+siob_tx_char:
+	call	siob_tx_ready
+	jr	z,siob_tx_char
+	ld	a,c
+	out	(sio_bd),a	; send the character
+	ret
+
+con_tx_char:
+sioa_tx_char:
+	call	sioa_tx_ready
+	jr	z,sioa_tx_char
+	ld	a,c
+	out	(sio_ad),a	; send the character
+	ret
+
+;##############################################################
+; Wait for the receiver to become ready and then return the
+; character in the A register.
+; Clobbers: AF
+;##############################################################
+siob_rx_char:
+	call	siob_rx_ready
+	jr	z,siob_rx_char
+	ld	a,(sio_bd)
+	ret
+
+con_rx_char:
+sioa_rx_char:
+	call	sioa_rx_ready
+	jr	z,sioa_rx_char
+	in	a,(sio_ad)
+	ret
+
+; Drivers for CTC
+
+	DSEG			
+
+;#############################################################################
+; CTC 0  
+;#############################################################################
+
+; init_ctc_0:
+	; ld	a,0b7h			; EI, timer mode, /256 prescale, TC follows, reset, ctl
+	; out	(ctc_0),a
+	; xor a				; 0=256 (as slow as it can go = system_clock_hz/256/256)
+	; out	(ctc_0),a
+	; ld hl,ctc0_isr
+	; ld (IVTbase),hl		; load the ISR into the IVT
+	; ret
+
+;#############################################################################
+; Init the bit-rate generator for SIO A.
+; C = clock divisor
+;#############################################################################
+
+init_ctc_1:
+    ld      a,047h      ; TC follows, Counter, Control, Reset
+    out     (ctc_1),a
+    ld      a,c
+    out     (ctc_1),a
+    ret
+
+;#############################################################################
+; Init the bit-rate generator for SIO B.
+; C = clock divisor
+;#############################################################################
+
+
+init_ctc_2:
+    ld      a,047h      ; TC follows, Counter, Control, Reset
+    out     (ctc_2),a
+    ld      a,c
+    out     (ctc_2),a
+    ret
+
+;#############################################################################
+; Set CTC3 to free-run and generate IRQs at system_clock_hz/65536.
+; If system_clock_hz == 10 MHZ then the IRQ rate will be approx. 152 HZ.
+;
+; Note: It is OK to EI before we send the time-constant because the
+; timer will not yet have been started.
+;#############################################################################
+init_ctc_3:
+if RTC_debug > 0
+	;call spamon
+	ld a,'#'
+	ld c,a
+	call sioa_tx_char
+endif	
+	xor a
+	out (ctc_0),a		; IRQ Vector = 0
+
+	im 2
+	ld a,0FFh
+	ld i,a				; IVT starts at 0xFF00
+	
+	ld hl,rtc_irq_handler
+	ld (IVTbase+6),hl	; load the ISR into the IVT
+	
+	ld	a,0b7h			; EI, timer mode, /256 prescale, TC follows, reset, ctl
+	out	(ctc_3),a
+
+	xor a				; 0=256 (as slow as it can go = system_clock_hz/256/256)
+	out	(ctc_3),a
+
+	ei
+	ret
+
+	CSEG
+
+;##############################################################
+; Write the null-terminated string starting after the call
+; instruction invoking this subroutine to the console.
+; Clobbers AF, C
+;##############################################################
+iputs:
+        ex      (sp),hl                 ; hl = @ of string to print
+	call	.puts_loop
+        inc     hl                      ; point past the end of the string
+        ex      (sp),hl
+        ret
+
+;##############################################################
+; Write the null-terminated staring starting at the address in
+; HL to the console.
+; Clobbers: AF, C
+;##############################################################
+puts:
+	push	hl
+	call	.puts_loop
+	pop	hl
+	ret
+
+.puts_loop:
+        ld      a,(hl)                  ; get the next byte to send
+        or      a
+        jr      z,.puts_done             ; if A is zero, return
+        ld      c,a
+        call    con_tx_char
+        inc     hl                      ; point to next byte to write
+        jp      .puts_loop
+.puts_done:
+        ret
+
+;##############################################################
+; Print a CRLF
+; Clobbers AF, C
+;##############################################################
+puts_crlf:
+        call    iputs
+        defb    cr,lf,0
+        ret
+
+;############################################################################
+; An library suitable for tallking to an Epson RX-80 printer.
+;############################################################################
+
+
+;##########################################################################
+; Just set the print strobe & line-feed signals high.
+;
+; NOTE: The line-feed signal is ignored here and is assumed to be
+;	left set high by the init code in the SIO driver!
+;
+; Clobbers AF
+;##########################################################################
+DSEG
+prn_init:
+	ld	a,(gpiocache)
+	or	gpio_out_prn_stb	; make PRN_STB high (false)
+	ld	(gpiocache),a	; save in the cached output value
+	out	(gpio_out),a		; make it so in the GPIO register too
+	ret
+CSEG
+;##########################################################################
+; Return A=0 if printer is not ready.
+; Return A=0xff if printer is ready.
+; Clobbers AF
+;##########################################################################
+prn_stat:
+	in	a,(gpio_in)
+	and	gpio_in_prn_bsy		; if this bit is low then it is ready
+	jr	z,.prn_stat_ready
+	xor	a			; A=0 = not ready
+	ret
+.prn_stat_ready:
+	dec	a			; A=0xff = ready
+	ret
+
+
+;##########################################################################
+; Print the character in the C register.
+;##########################################################################
+prn_out:
+
+	; Sanity check to prevent seizing the entire OS.
+	; If EVERY printer status input is high, then there is probably no
+	; printer attached!  This is reasonable since paper-empty high should
+	; also force gpio_in_prn_err low at same time.
+
+	in	a,(gpio_in)
+	and	gpio_in_prn_err|gpio_in_prn_stat|gpio_in_prn_papr|gpio_in_prn_bsy|gpio_in_prn_ack
+	cp	gpio_in_prn_err|gpio_in_prn_stat|gpio_in_prn_papr|gpio_in_prn_bsy|gpio_in_prn_ack
+	ret	z			; If all signals high then just discard the data.
+
+	; wait until the printer is ready for data
+	; XXX this can seize the system if the printer is offline!  :-(
+.list_wait:
+	call	prn_stat
+	or	a
+	jr	z,.list_wait		; if A=0 then is not ready
+
+	; proceed to print the character
+	ld	a,c
+	out	(prn_dat),a		; put the character code into the output latch
+
+	; assert the strobe signal
+	ld	a,(gpiocache)
+	and	~gpio_out_prn_stb	; set the strobe signal low
+	out	(gpio_out),a		; write to port but not update cache!
+
+	; A brief delay so that strobe signal can be seen by the printer.
+	ld	a,010h			; loop 16 times
+.list_stb_wait:
+	dec	a
+	jr	nz,.list_stb_wait
+
+	; raise the strobe signal
+	ld	a,(gpiocache)	; we never updated the cache, so this is right
+	out	(gpio_out),a
+	ret
+
+CSEG
+spamon:
+	ld a,16
+	out (0FDh),a
+	ret
+	
+spamoff:
+	xor a,a
+	out (0FDh),a
+	ret
+
+	end

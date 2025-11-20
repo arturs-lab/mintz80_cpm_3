@@ -1,0 +1,11 @@
+r Loader\CPMLDR.ASM
+r Loader\ldrbios.z80
+
+RMAC CPMLDR
+ZMAC ldrbios
+
+LINK LDR[L100]=CPMLDR,LDRBIOS
+
+era LDR.BIN
+ren LDR.BIN=LDR.COM
+w build\LDR.BIN b

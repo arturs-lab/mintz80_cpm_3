@@ -1,0 +1,11 @@
+r Tools\xmm.z80
+zmac xmm
+link xmm [op]
+era xmm.rsx
+ren xmm.rsx=xmm.prl
+r Tools\xmms.z80
+zmac xmms
+link xmms
+
+w xmm.rsx b
+w xmms.com b
