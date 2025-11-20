@@ -1,13 +1,14 @@
 attic
 extract
 turbo*.*
+stat.com
 altairz80.exe
-cpm3.
-*.dsk
-CPM3.SYS
-*.COM
-*.RSX
-*.PRL
-*.REL
-*.ROM
+#cpm3.
+#*.dsk
+#CPM3.SYS
+#*.COM
+#*.RSX
+#*.PRL
+#*.REL
+#*.ROM
 
