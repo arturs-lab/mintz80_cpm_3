@@ -5,7 +5,6 @@ cpm3.
 CPM3.SYS
 *.COM
 *.RSX
-*.SPR
 *.PRL
 *.REL
 *.ROM
