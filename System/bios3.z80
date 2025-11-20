@@ -1,7 +1,8 @@
 ;##########################################################################
 ; CP/M 3 BIOS for 2063 z80 retro board
 ;
-; Sources originally written by John Winans with contributions from Trevor Jacobs
+; Sources originally written by John Winans
+; with contributions from Trevor Jacobs
 ; Refactored for CP/M 3 by SolderGirl
 ;
 ;##########################################################################
@@ -19,7 +20,8 @@ RTC_debug	equ 0
 ;##########################################################################
 ; 'System Control Block Definition for CP/M3 BIOS'
 ; From the CP/M 3 System Manual over at
-; http://www.s100computers.com/Software%20Folder/CPM3%20BIOS%20Installation/CPM3%20System%20Guide.pdf
+; http://www.s100computers.com/Software%20Folder/
+;CPM3%20BIOS%20Installation/CPM3%20System%20Guide.pdf
 ;
 ; These are all the public variables defined by CPM3
 ;##########################################################################
@@ -279,8 +281,10 @@ ret
 ; Define two lists of bytes to return for Joysticks
 ; These should be changeable by a USER function call
 	; public j0keys,j1keys
-; j0keys:	db '4','7','8','9','6','3','2','1','5','0' 	; Left,LeftUp,Up,UpRight,Right,RightDown,Down,LeftDown,Fire,Button2
-; j1keys:	db '4','7','8','9','6','3','2','1','5','0' 	; Left,LeftUp,Up,UpRight,Right,RightDown,Down,LeftDown,Fire,Button2
+; j0keys:	db '4','7','8','9','6','3','2','1','5','0' 	
+; Left,LeftUp,Up,UpRight,Right,RightDown,Down,LeftDown,Fire,Button2
+; j1keys:	db '4','7','8','9','6','3','2','1','5','0' 	
+; Left,LeftUp,Up,UpRight,Right,RightDown,Down,LeftDown,Fire,Button2
 
 ; joy_rx_char:
 	; call j0rdy
@@ -461,33 +465,6 @@ ret
 	; ei
 	; reti
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 ;###############################################
 ; Timer 3 -> RTC
 ;###############################################
@@ -639,7 +616,8 @@ endif
 	; ; @bdtbl
 	; ld hl,@bdtbl
 	; add hl,bc
-	; ld	c,(hl)				; C=192=600bps, C=96=1200bps, C=48=2400bps, C=24=4800bps, C=12=9600bps, C=6=19200bps, C=3=38400, C=1=115200bps
+	; ld	c,(hl)				
+; C=192=600bps, C=96=1200bps, C=48=2400bps, C=24=4800bps, C=12=9600bps, C=6=19200bps, C=3=38400, C=1=115200bps
 	; call	init_ctc_1		; start CTC1 in case J11-A selects it!
 	; call	sioa_init		; 115200 or 19200/9600 depending on J11-A
 	; ret
@@ -654,7 +632,8 @@ endif
 	; ; @bdtbl
 	; ld hl,@bdtbl
 	; add hl,bc
-	; ld	c,(hl)				; C=192=600bps, C=96=1200bps, C=48=2400bps, C=24=4800bps, C=12=9600bps, C=6=19200bps, C=3=38400, C=1=115200bps
+	; ld	c,(hl)				
+; C=192=600bps, C=96=1200bps, C=48=2400bps, C=24=4800bps, C=12=9600bps, C=6=19200bps, C=3=38400, C=1=115200bps
 	; call	init_ctc_2		; start CTC2 in case J11-B selects it!
 	; call	siob_init		; 115200 or 19200/9600 depending on J11-A
 	; ret
